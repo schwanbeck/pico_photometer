@@ -20,20 +20,24 @@ from micropython import const, opt_level
 from machine import Pin, PWM, ADC  # , RTC
 from ucollections import namedtuple
 import os
+
 # import errno
 
 # unsigned 16 bit integer maximum
 MAX_U16 = const(65535)
 
+# Global PWM duty frequency to max u16 (no specific reason)
+PWM_FREQUENCY = MAX_U16
+
 # Change for code optimisation
 # See https://docs.micropython.org/en/latest/library/micropython.html?highlight=const#micropython.opt_level
 opt_level(0)
 
-# @todo: create file for variables/settings
 # Set range of duty cycles to test, currently 0, 500, 1000, ..., 3500
 # If only one is desired, for example 3500, set this to
 # PWM_DUTY_CYCLES = [3500]
-PWM_DUTY_CYCLES = [i for i in range(0, MAX_U16//2, 3000)]
+# PWM_DUTY_CYCLES = [i for i in range(0, PWM_FREQUENCY//2, 3000)]
+PWM_DUTY_CYCLES = [0, 3000, 9000, PWM_FREQUENCY // 2, PWM_FREQUENCY]
 
 # Pairs for LED anodes and photoresistor anodes
 RESISTOR_LED_GPIO_PAIRS = [
@@ -76,9 +80,6 @@ NAMEDTUPLE_LED_RESISTOR_PAIR = namedtuple(
     ]
 )
 
-# Global PWM duty frequency to max u16 (no specific reason)
-PWM_FREQUENCY = MAX_U16
-
 # Indicator LED for fun
 WORKING_INDICATOR_LED = Pin("LED", mode=Pin.OUT, value=0)
 
@@ -89,11 +90,10 @@ PIN_ADC0 = const(26)
 MEASURE_ADC0 = ADC(Pin(PIN_ADC0))
 
 
-def get_time_string():
-    """
-    Return time string based on pico internal clock
+def get_time_string() -> str:
+    """Return time string based on pico internal clock
+
     :return: Time string in the form of YYYYMMDD-HHMMSS
-    :rtype: str
     """
     # timest"%04d-%02d-%02d %02d:%02d:%02d"%(timestamp[0:3] + timestamp[4:7])
     # return "%04d-%02d-%02d %02d:%02d:%02d"%(timestamp[0:3] + timestamp[4:7])
@@ -119,7 +119,7 @@ class DummyWorkingLED:
 
 
 class Photometer:
-    """
+    """ Raspberry Pico based Photometer
 
     """
 
@@ -136,23 +136,49 @@ class Photometer:
             pwm_frequency: int = PWM_FREQUENCY,
             adc_pin: int | None = None,
     ):
-        """
+        """ Initialize Photometer.
+
+        # Example usage:
+        photometer = Photometer(
+            # Give the photoresistor 2 seconds to get up to speed:
+            measurement_led_warmup_seconds=2,
+
+            # Wait 200 ms between measurements:
+            measurement_repeat_interval_seconds=.2,
+
+            # Measure 5 times per sample:
+            measurement_repeats=5,
+
+            # Measure every 15 minutes:
+            measurement_frequency_seconds=900,
+
+            # Defaults to GPIO 0-7 for LEDs and GPIO 8-15 for photoresistors
+            # ie. [(0, 8), (1, 9), ..., (7, 15)]
+            resistor_led_gpio_pairs=None,
+
+            # Optional, change according to whether it's a pico W or regular:
+            working_led= Pin("LED", mode=Pin.OUT, value=0),
+        )
+        # Test if photoresistors and LEDs are working
+        photometer.perform_self_test()
+        # Start Measuring
+        photometer.main_loop()
 
         :param measurement_led_warmup_seconds: Wait this long to let the LED shine before taking first measurement.
             Allows the Photoresistor to acclimatise.
         :param measurement_repeats: How many measurements to take
         :param measurement_repeat_interval_seconds: How long to wait in between measurements
         :param measurement_frequency_seconds: How long to wait between measurement cycles
-        :param pwm_duty_cycles:
-        :param resistor_led_gpio_pairs:
-        :param write_path_accessible_for_pi:
-        :param working_led:
-        :param pwm_frequency:
+        :param pwm_duty_cycles: List of lamp intensity values to test
+        :param resistor_led_gpio_pairs: List of tuples indicating which GPIO pairs controls which LED/Photoresistor
+        :param write_path_accessible_for_pi: Path for output .csv file
+        :param working_led: Active measuring indicator LED, optional
+        :param pwm_frequency: Frequency for PWM modulation, will be used to set LEDs to fully on
         :param adc_pin: GPIO number for analog-to-digital converter output, defaults to ADC0 / GPIO pin 26
         """
 
         assert any([resistor_led_gpio_pairs, RESISTOR_LED_GPIO_PAIRS]), \
-               "No GPIO pairs specified!"
+            "No GPIO pairs specified!"
         self.working_led = working_led if working_led else DummyWorkingLED
         self.adc = ADC(Pin(adc_pin if adc_pin is not None else PIN_ADC0))
         # Initialise time point
@@ -197,21 +223,24 @@ class Photometer:
         print(self.file_path)
 
     def reset_pins(self) -> None:
-        """Reset used GPIO pins to no output
+        """ Reset used GPIO pins to no output / off state
 
         :return: None
         """
 
         for pin_pair in self.dict_pin_pairs.values():
-            pin_pair.PWM_LED_ANODE.duty_u16(0)
-            pin_pair.PIN_RESISTOR_ANODE.off()
+            self.change_pair_settings(
+                namedtuple_led_resistor_pair=pin_pair,
+                value=0,
+                on=False,
+            )
         # self.working_led.off()
 
     def read_light(
             self,
             adc_pin: int | None = None
     ) -> int:
-        """Read analog-to-digital converter output, defaults to ADC0 / GPIO pin 26
+        """ Read analog-to-digital converter output, defaults to ADC0 / GPIO pin 26
 
         :param adc_pin:
         :return: 16 bit reading from ADC
@@ -227,7 +256,7 @@ class Photometer:
             led_duty_power: int,
             result_list: list[str | int, ...],
     ) -> str:
-        """Format results, spaced by tabs.
+        """ Format results, spaced by tabs.
 
         Time - nr LED anode - nr resistor anode - LED power 0-65535 - result(s)
         Uses NAMEDTUPLE_LED_RESISTOR_PAIR to get numbers of GPIO pin for LED and photoresistor
@@ -256,7 +285,7 @@ class Photometer:
             measurement_repeat_interval_seconds: int | None = None,
             cleanup_after: bool = True,
     ) -> list[int, ...]:
-        """Perform measurement on selected LED / photoresistor at specified LED duty power
+        """ Perform measurement on selected LED / photoresistor at specified LED duty power
 
         :param namedtuple_led_resistor_pair: used NAMEDTUPLE_LED_RESISTOR_PAIR instance
         :param led_duty_power: used LED duty power setting
@@ -282,7 +311,7 @@ class Photometer:
         # Set LED duty power, select photoresistor
         self.change_pair_settings(
             namedtuple_led_resistor_pair=namedtuple_led_resistor_pair,
-            value=led_duty_power
+            value=led_duty_power,
         )
 
         if measurement_led_warmup_seconds:
@@ -355,7 +384,7 @@ class Photometer:
             value: int,
             on: bool = True,
     ) -> None:
-        """Placeholder function to set LED brightness, so extending later is easier
+        """ Placeholder function to set LED brightness, so extending later is easier
 
         :param namedtuple_led_resistor_pair: used NAMEDTUPLE_LED_RESISTOR_PAIR instance
         :param value: value to set brightness to
@@ -373,7 +402,7 @@ class Photometer:
             self,
             result: str,
     ) -> None:
-        """Print result, write result to file if possible.
+        """ Print result, write result to file if possible.
 
         :param result: Result string
         :return: None
@@ -396,7 +425,7 @@ class Photometer:
             namedtuple_led_resistor_pair: namedtuple,
             led_duty_power: int,
     ) -> None:
-        """Perform measurement, format results, then save result to file
+        """ Perform measurement, format results, then save result to file
 
         :param namedtuple_led_resistor_pair: used NAMEDTUPLE_LED_RESISTOR_PAIR instance
         :param led_duty_power: used LED duty power setting
@@ -415,7 +444,7 @@ class Photometer:
         self.save_result(result)
 
     def measure_pwm_duty_cycles(self) -> None:
-        """Perform the whole measurement cycle with all LED/photoresistor pairs at every LED power setting
+        """ Perform the whole measurement cycle with all LED/photoresistor pairs at every LED power setting
 
         :return: None
         """
@@ -430,7 +459,7 @@ class Photometer:
     def has_time_passed(
             self,
     ) -> (bool, int):
-        """Check if time has passed since last measurement
+        """ Check if time has passed since last measurement
 
         :return: True if time has passed, False otherwise, time remaining
         """
@@ -446,7 +475,10 @@ class Photometer:
         return False, self.measurement_frequency_seconds - delta
 
     def main_loop(self) -> None:
-        """Main function loop
+        """ Main function loop
+
+        Waits until time has passed, then starts to measure.
+        Working LED is set to on (if it exists) to indicate active measuring.
 
         :return: None
         """
@@ -454,11 +486,12 @@ class Photometer:
         try:
             while True:
                 while True:
-                    # Wait for time to pass
+                    # Wait for time to pass, print remaining time
                     has_time_passed, current_timedelta = self.has_time_passed()
                     if has_time_passed:
                         break
-                    time.sleep(int(current_timedelta))
+                    # Count down in minutes so we can see progress on StdOut
+                    time.sleep(int(min(current_timedelta, 60)))
                     # Could replace with machine.idle() / .lightsleep(), might need different data recording method
 
                 # Measure

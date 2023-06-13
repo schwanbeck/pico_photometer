@@ -16,16 +16,54 @@
 # https://askubuntu.com/questions/519/how-do-i-write-a-shell-script-to-install-a-list-of-applications/956410#956410
 set -eu -o pipefail
 
-if ! command -v mpremote &> /dev/null
+# Add time stamps if possible, print normally otherwise
+if ! command -v ts &> /dev/null;
 then
-    echo "mpremote could not be found"
-    exit
+  function ts {
+    cat < /dev/stdin
+  }
+fi
+
+# Set file path
+if command -v realpath &> /dev/null;
+then
+  # If possible, expand path
+  file_path=$(realpath $"$(dirname "$0")/pico_photometer.py")
+else
+  # Hope that this works
+  file_path="./pico_photometer.py"
+fi
+
+# Test for mpremote installation
+if ! command -v mpremote &> /dev/null;
+then
+  echo "mpremote could not be found, please install it" | ts
+  echo "See: https://pypi.org/project/mpremote/" | ts
+  exit 1
+fi
+
+# Test if script is present
+# echo "Checking Python script under $file_path" | ts
+if ! test -f "$file_path";
+then
+  echo "Python script not found: $file_path" | ts
+  echo "Downloading file now" | ts
+  wget -t -c --show-progress -O "$file_path" https://raw.githubusercontent.com/schwanbeck/pico_photometer/master/pico_photometer.py
+  echo "Check correct settings in script: " "$file_path" | ts
+  echo "Aborting." | ts
+  exit 1
+fi
+
+# Check if device can be connected
+if ! mpremote disconnect | ts;
+then
+  echo "Could not connect to a device, aborting." | ts
+  exit 1
 fi
 
 echo "Starting mpremote, disconnecting & connecting (auto: first available pico) to reset pico,
-mounting local folder and running ./pico_photometer.py"
-
+mounting local folder and running ./pico_photometer.py" | ts
 # further arguments: setrtc - sets the clock, currently buggy (20230524)
 # See: https://github.com/orgs/micropython/discussions/9096#discussioncomment-5785470
-
-exec mpremote disconnect connect reset setrtc auto mount . run "$(dirname "$0")/pico_photometer.py"
+mpremote disconnect auto reset rtc --set rtc | ts
+exec mpremote mount . run "$file_path" | ts
