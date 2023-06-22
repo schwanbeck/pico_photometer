@@ -65,5 +65,5 @@ echo "Starting mpremote, disconnecting & connecting (auto: first available pico)
 mounting local folder and running ./pico_photometer.py" | ts
 # further arguments: setrtc - sets the clock, currently buggy (20230524)
 # See: https://github.com/orgs/micropython/discussions/9096#discussioncomment-5785470
-mpremote disconnect auto reset rtc --set rtc | ts
-exec mpremote mount . run "$file_path" | ts
+# mpremote disconnect auto reset rtc --set rtc | ts
+exec mpremote disconnect connect auto setrtc mount . run "$file_path" | ts

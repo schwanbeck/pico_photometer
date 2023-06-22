@@ -68,6 +68,7 @@ NR_LED_ANODE = 'NR_LED_ANODE'
 PWM_LED_ANODE = 'PWM_LED_ANODE'
 NR_RESISTOR_ANODE = 'NR_RESISTOR_ANODE'
 PIN_RESISTOR_ANODE = 'PIN_RESISTOR_ANODE'
+PWM_CORRECTIVE_RATIO = 'PWM_CORRECTIVE_RATIO'
 
 # create namedtuple to hold LED and resistor pairs
 NAMEDTUPLE_LED_RESISTOR_PAIR = namedtuple(
@@ -77,6 +78,7 @@ NAMEDTUPLE_LED_RESISTOR_PAIR = namedtuple(
         PWM_LED_ANODE,
         NR_RESISTOR_ANODE,
         PIN_RESISTOR_ANODE,
+        PWM_CORRECTIVE_RATIO,
     ]
 )
 
@@ -119,7 +121,7 @@ class DummyWorkingLED:
 
 
 class Photometer:
-    """ Raspberry Pico based Photometer
+    """ Raspberry Pico based fixed wavelength photometer
 
     """
 
@@ -195,17 +197,26 @@ class Photometer:
         # PWM anodes for LEDs are set to the global frequency and initialized with an off-duty cycle
         # Resistor anode pins are set to output pins and logical off
         # Named tuples are chosen as to have an easier time referencing values later
-        self.dict_pin_pairs = {
-            number: NAMEDTUPLE_LED_RESISTOR_PAIR(
-                NR_LED_ANODE=pin_led,
-                PWM_LED_ANODE=PWM(Pin(pin_led, Pin.OUT, value=0), freq=self.pwm_frequency, duty_u16=0),
-                NR_RESISTOR_ANODE=pin_resistor,
-                PIN_RESISTOR_ANODE=Pin(pin_resistor, mode=Pin.OUT, value=0),
-            ) for number, (pin_led, pin_resistor) in enumerate(
+        self.dict_pin_pairs = {}
+
+        for number, (pin_led, pin_resistor) in enumerate(
                 # Go with RESISTOR_LED_GPIO_PAIRS unless resistor_led_gpio_pairs has been specified
                 resistor_led_gpio_pairs if resistor_led_gpio_pairs else RESISTOR_LED_GPIO_PAIRS
+        ):
+            try:
+                # This used to work but there appears to be a bug with PWM initialisation
+                _pwm = PWM(Pin(pin_led, Pin.OUT, value=0), freq=self.pwm_frequency, duty_u16=0)
+            except TypeError:
+                _pwm = PWM(Pin(pin_led, Pin.OUT, value=0))
+                _pwm.freq(self.pwm_frequency)
+                _pwm.duty_u16(0)
+            self.dict_pin_pairs[number] = NAMEDTUPLE_LED_RESISTOR_PAIR(
+                NR_LED_ANODE=pin_led,
+                PWM_LED_ANODE=_pwm,
+                NR_RESISTOR_ANODE=pin_resistor,
+                PIN_RESISTOR_ANODE=Pin(pin_resistor, mode=Pin.OUT, value=0),
+                PWM_CORRECTIVE_RATIO=1,
             )
-        }
 
         # Convenience conversion so we can iterate over the keys
         self.keys_pin_pairs = list(self.dict_pin_pairs.keys())
@@ -222,33 +233,42 @@ class Photometer:
 
         print(self.file_path)
 
-    def reset_pins(self) -> None:
-        """ Reset used GPIO pins to no output / off state
+    @staticmethod
+    def change_pair_settings(
+            namedtuple_led_resistor_pair: namedtuple,
+            value: int,
+            corrective_ratio_value: float | None = None,
+            photoresistor_gpio_on: bool = True,
+    ) -> None:
+        """ Function to set LED brightness via pulse width modulation and select/deselect photoresistor GPIO.
 
+        The value for PWM has to be within [0, MAX_U16] and will be changed by the offset ratio defined for each LED.
+        In case the ratio makes the value go over, MAX_U16 will be used instead.
+
+        :param namedtuple_led_resistor_pair: used NAMEDTUPLE_LED_RESISTOR_PAIR instance
+        :param value: value to set brightness to
+        :param corrective_ratio_value: Overwrite the corrective_ratio_value if given,
+            use namedtuple_led_resistor_pair corrective_ratio_value if None
+        :param photoresistor_gpio_on: whether to switch on or off
         :return: None
         """
 
-        for pin_pair in self.dict_pin_pairs.values():
-            self.change_pair_settings(
-                namedtuple_led_resistor_pair=pin_pair,
-                value=0,
-                on=False,
-            )
-        # self.working_led.off()
+        assert 0 <= value <= MAX_U16, \
+            f"Pulse width modulation outside of allowable range [0, {MAX_U16}]: {value}"
+        assert corrective_ratio_value is None or 0 < corrective_ratio_value < 2, \
+            f"Given ratio_value out of bounds (0, 2): {corrective_ratio_value}"
 
-    def read_light(
-            self,
-            adc_pin: int | None = None
-    ) -> int:
-        """ Read analog-to-digital converter output, defaults to ADC0 / GPIO pin 26
+        _ratio_value = corrective_ratio_value if corrective_ratio_value else \
+            namedtuple_led_resistor_pair.PWM_CORRECTIVE_RATIO
 
-        :param adc_pin:
-        :return: 16 bit reading from ADC
-        """
-
-        if adc_pin is not None:
-            return ADC(Pin(adc_pin)).read_u16()
-        return self.adc.read_u16()
+        # Set duty to given value times corrective ratio or MAX_U16, depending which is lower
+        namedtuple_led_resistor_pair.PWM_LED_ANODE.duty_u16(
+            int(min(value * _ratio_value, MAX_U16))
+        )
+        if photoresistor_gpio_on:
+            namedtuple_led_resistor_pair.PIN_RESISTOR_ANODE.on()
+        else:
+            namedtuple_led_resistor_pair.PIN_RESISTOR_ANODE.off()
 
     @staticmethod
     def format_result(
@@ -258,7 +278,7 @@ class Photometer:
     ) -> str:
         """ Format results, spaced by tabs.
 
-        Time - nr LED anode - nr resistor anode - LED power 0-65535 - result(s)
+        Time - nr LED anode - nr resistor anode - LED power - result(s)
         Uses NAMEDTUPLE_LED_RESISTOR_PAIR to get numbers of GPIO pin for LED and photoresistor
 
         :param namedtuple_led_resistor_pair: used NAMEDTUPLE_LED_RESISTOR_PAIR instance
@@ -275,6 +295,34 @@ class Photometer:
                 led_duty_power,
             ] + result_list
         )
+
+    def reset_pins(self) -> None:
+        """ Reset used GPIO pins to no output / off state
+
+        :return: None
+        """
+
+        for pin_pair in self.dict_pin_pairs.values():
+            self.change_pair_settings(
+                namedtuple_led_resistor_pair=pin_pair,
+                value=0,
+                photoresistor_gpio_on=False,
+            )
+        # self.working_led.off()
+
+    def read_light(
+            self,
+            adc_pin: int | None = None
+    ) -> int:
+        """ Read analog-to-digital converter output, defaults to ADC0 / GPIO pin 26
+
+        :param adc_pin: GPIO number, defaults to ADC0 / GPIO pin 26 if None
+        :return: 16 bit reading from ADC
+        """
+
+        if adc_pin is not None:
+            return ADC(Pin(adc_pin)).read_u16()
+        return self.adc.read_u16()
 
     def perform_measurement(
             self,
@@ -298,9 +346,6 @@ class Photometer:
         """
 
         result = []
-        assert 0 <= led_duty_power <= MAX_U16, \
-            f"Pulse width modulation outside of allowable range [0, {MAX_U16}]: {led_duty_power}"
-
         # Set values to default or specified
         measurement_repeats = self.measurement_repeats if measurement_repeats is None else measurement_repeats
         measurement_led_warmup_seconds = self.measurement_led_warmup_seconds if \
@@ -328,7 +373,7 @@ class Photometer:
             self.change_pair_settings(
                 namedtuple_led_resistor_pair=namedtuple_led_resistor_pair,
                 value=0,
-                on=False,
+                photoresistor_gpio_on=False,
             )
         return result
 
@@ -360,7 +405,7 @@ class Photometer:
             self.change_pair_settings(
                 namedtuple_led_resistor_pair=self.dict_pin_pairs[key],
                 value=self.pwm_frequency,
-                on=False,
+                photoresistor_gpio_on=False,
             )
         time.sleep(2)
         # Get bright values
@@ -378,25 +423,9 @@ class Photometer:
             print(f"GPIO LED {self.dict_pin_pairs[k].NR_LED_ANODE}: {sum(v) / len(v)} (min: {min(v)}, max: {max(v)})")
         self.reset_pins()
 
-    @staticmethod
-    def change_pair_settings(
-            namedtuple_led_resistor_pair: namedtuple,
-            value: int,
-            on: bool = True,
-    ) -> None:
-        """ Placeholder function to set LED brightness, so extending later is easier
-
-        :param namedtuple_led_resistor_pair: used NAMEDTUPLE_LED_RESISTOR_PAIR instance
-        :param value: value to set brightness to
-        :param on: whether to switch on or off
-        :return: None
-        """
-
-        namedtuple_led_resistor_pair.PWM_LED_ANODE.duty_u16(value)
-        if on:
-            namedtuple_led_resistor_pair.PIN_RESISTOR_ANODE.on()
-        else:
-            namedtuple_led_resistor_pair.PIN_RESISTOR_ANODE.off()
+    def perform_blank(self):
+        # @todo: create self correcting blank function to set PWM_CORRECTIVE_RATIO
+        pass
 
     def save_result(
             self,
@@ -461,7 +490,7 @@ class Photometer:
     ) -> (bool, int):
         """ Check if time has passed since last measurement
 
-        :return: True if time has passed, False otherwise, time remaining
+        :return: True if time has passed / False otherwise, time remaining
         """
 
         now = time.time()
