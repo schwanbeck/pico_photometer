@@ -17,12 +17,21 @@
 set -eu -o pipefail
 
 # Add time stamps if possible, print normally otherwise
-if ! command -v ts &> /dev/null;
-then
-  function ts {
-    cat < /dev/stdin
-  }
-fi
+
+# Define a timestamp function
+timestamp() {
+  # current time
+  date +"%Y-%m-%d %H:%M:%S"
+}
+
+#  if ! command -v ts &> /dev/null;
+#  then
+#    function ts {
+#      cat < /dev/stdin
+#    }
+#  fi
+
+# xargs -0  printf 'SELECT %s INTO MyTable'
 
 # Set file path
 if command -v realpath &> /dev/null;

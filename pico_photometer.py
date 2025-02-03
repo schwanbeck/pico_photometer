@@ -16,84 +16,38 @@ not, see <https://www.gnu.org/licenses/>.
 
 import time
 import sys
-from micropython import const, opt_level
+from micropython import opt_level
 from machine import Pin, PWM, ADC  # , RTC
 from ucollections import namedtuple
 import os
+from Photometer.constants import (
+    PIN_ADC0,
+    MEASUREMENT_REPEATS,
+    SEPERATOR,
+    PWM_FREQUENCY,
+    MEASUREMENT_REPEAT_INTERVAL_SECONDS,
+    MAX_U16,
+    MEASUREMENT_LED_WARMUP_SECONDS,
+    MEASUREMENT_FREQUENCY_SECONDS,
+    RESISTOR_LED_GPIO_PAIRS,
+    PWM_DUTY_CYCLES,
+    NAMEDTUPLE_LED_RESISTOR_PAIR,
+)
 
 # import errno
-
-# unsigned 16 bit integer maximum
-MAX_U16 = const(65535)
-
-# Global PWM duty frequency to max u16 (no specific reason)
-PWM_FREQUENCY = MAX_U16
 
 # Change for code optimisation
 # See https://docs.micropython.org/en/latest/library/micropython.html?highlight=const#micropython.opt_level
 opt_level(0)
 
-# Set range of duty cycles to test, currently 0, 500, 1000, ..., 3500
-# If only one is desired, for example 3500, set this to
-# PWM_DUTY_CYCLES = [3500]
-# PWM_DUTY_CYCLES = [i for i in range(0, PWM_FREQUENCY//2, 3000)]
-PWM_DUTY_CYCLES = [0, 3000, 9000, PWM_FREQUENCY // 2, PWM_FREQUENCY]
-
-# Pairs for LED anodes and photoresistor anodes
-RESISTOR_LED_GPIO_PAIRS = [
-    # (LED anode GPIO pin number, Resistor anode GPIO pin number)
-    (0, 8),
-    (1, 9),
-    (2, 10),
-    (3, 11),
-    (4, 12),
-    (5, 13),
-    (6, 14),
-    (7, 15),
-]
-
-# How often to repeat a measurement:
-MEASUREMENT_REPEATS = const(5)
-# How many seconds to wait between repeats (.2: 200 ms):
-MEASUREMENT_REPEAT_INTERVAL_SECONDS = const(.2)
-# How many seconds between each measurement cycle (300 = 5 minutes):
-MEASUREMENT_FREQUENCY_SECONDS = const(900)
-# How long to wait before a measurement for the first time (so LED is at right setting):
-MEASUREMENT_LED_WARMUP_SECONDS = const(2)
-
-# Total length of measurement for default values:
-# 8 measurements * (2 warmup seconds + (5 repeats * .2 interval seconds)) equals roughly 24 seconds
-
-NR_LED_ANODE = 'NR_LED_ANODE'
-PWM_LED_ANODE = 'PWM_LED_ANODE'
-NR_RESISTOR_ANODE = 'NR_RESISTOR_ANODE'
-PIN_RESISTOR_ANODE = 'PIN_RESISTOR_ANODE'
-PWM_CORRECTIVE_RATIO = 'PWM_CORRECTIVE_RATIO'
-
-# create namedtuple to hold LED and resistor pairs
-NAMEDTUPLE_LED_RESISTOR_PAIR = namedtuple(
-    "NAMEDTUPLE_LED_RESISTOR_PAIR",
-    [
-        NR_LED_ANODE,
-        PWM_LED_ANODE,
-        NR_RESISTOR_ANODE,
-        PIN_RESISTOR_ANODE,
-        PWM_CORRECTIVE_RATIO,
-    ]
-)
-
 # Indicator LED for fun
 WORKING_INDICATOR_LED = Pin("LED", mode=Pin.OUT, value=0)
 
-# Analog-to-Digital converter GPIO pins: 26, 27 and 28 (Pico W anyway)
-# Future possibility to use more, cuts measurement time, but that shouldn't be critical
-# See: https://www.raspberrypi.com/documentation/microcontrollers/images/pico-pinout.svg
-PIN_ADC0 = const(26)
 MEASURE_ADC0 = ADC(Pin(PIN_ADC0))
 
 
 def get_time_string() -> str:
-    """Return time string based on pico internal clock
+    """ Return time string based on pico internal clock
 
     :return: Time string in the form of YYYYMMDD-HHMMSS
     """
@@ -106,17 +60,17 @@ def get_time_string() -> str:
 
 
 class DummyWorkingLED:
-    """Dummy class in case a working LED pin can't be used."""
+    """ Dummy class in case a working LED pin can't be used. """
 
-    def __int__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         pass
 
     @staticmethod
-    def on(*args, **kwargs):
+    def on(*args, **kwargs) -> None:
         pass
 
     @staticmethod
-    def off(*args, **kwargs):
+    def off(*args, **kwargs) -> None:
         pass
 
 
@@ -131,8 +85,8 @@ class Photometer:
             measurement_repeats: int = MEASUREMENT_REPEATS,
             measurement_repeat_interval_seconds: float = MEASUREMENT_REPEAT_INTERVAL_SECONDS,
             measurement_frequency_seconds: int = MEASUREMENT_FREQUENCY_SECONDS,
-            pwm_duty_cycles: list[int, ...] = None,
-            resistor_led_gpio_pairs: list[(int, int), ...] | None = None,
+            pwm_duty_cycles: list[int] = None,
+            resistor_led_gpio_pairs: list[(int, int)] | None = None,
             write_path_accessible_for_pi: str | None = None,
             working_led: Pin | None = None,
             pwm_frequency: int = PWM_FREQUENCY,
@@ -181,7 +135,7 @@ class Photometer:
 
         assert any([resistor_led_gpio_pairs, RESISTOR_LED_GPIO_PAIRS]), \
             "No GPIO pairs specified!"
-        self.working_led = working_led if working_led else DummyWorkingLED
+        self.working_led = working_led if working_led else DummyWorkingLED()
         self.adc = ADC(Pin(adc_pin if adc_pin is not None else PIN_ADC0))
         # Initialise time point
         self.utc_time_point_then = time.time()
@@ -274,7 +228,7 @@ class Photometer:
     def format_result(
             namedtuple_led_resistor_pair: namedtuple,
             led_duty_power: int,
-            result_list: list[str | int, ...],
+            result_list: list[str | int],
     ) -> str:
         """ Format results, spaced by tabs.
 
@@ -287,7 +241,7 @@ class Photometer:
         :return: Formatted result string for .csv
         """
 
-        return '\t'.join(
+        return SEPERATOR.join(
             str(i) for i in [
                 get_time_string(),
                 namedtuple_led_resistor_pair.NR_LED_ANODE,
@@ -332,7 +286,7 @@ class Photometer:
             measurement_repeats: int | None = None,
             measurement_repeat_interval_seconds: int | None = None,
             cleanup_after: bool = True,
-    ) -> list[int, ...]:
+    ) -> list[int]:
         """ Perform measurement on selected LED / photoresistor at specified LED duty power
 
         :param namedtuple_led_resistor_pair: used NAMEDTUPLE_LED_RESISTOR_PAIR instance
